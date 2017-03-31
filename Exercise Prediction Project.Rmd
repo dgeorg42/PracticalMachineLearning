@@ -1,0 +1,132 @@
+---
+title: "Prediction of the Manner in Which Exercises Were Performed"
+output:
+  html_document:
+    keep_md: yes
+  pdf_document: default
+---
+
+## Introduction
+
+In this analysis, we will examine exercise data from a variety of people who performed different types of exercises. The exercise data was collected via wearable devices used by the participants. Included in the data is a variable called _classe_, which contains a value of A, B, C, D, or E, depending on the manner in which the exercise was performed. The purpose of this project is to define a model which can be used to predict _classe_ based upon some or all of the other data provided.
+
+```{r}
+
+# Load required libraries
+library(caret)
+library(rpart)
+library(doParallel) 
+library(randomForest)
+
+# Set the seed to ensure reproducibility
+set.seed(23543675)
+```
+
+## Data Analysis and Cleaning
+
+Upon loading the data from the _pml-training.csv_ file, we can see that there are 160 variables (columns) in the dataset, and 19,622 rows. Further investigation shows that some columns consist almost exclusively of NA values; in fact, those columns which have any NA values at all have at least 97% NA values. Since these columns don't contain enough data to be useful, we will remove them from the dataset. Additionally, certain other columns have no predictive value - such as "X", which is simple a row index; "user_name", which is the name of the user performing the exercises; some timestamp fields; etc. These will also be removed from the dataset.
+
+Finally, we need to split our data into _training_ and _testing_ datasets; we will do this using a 70/30 split.
+
+```{r}
+
+# Set the working directory
+setwd("~/Learning/Coursera/Data Science Specialization/08 - Practical Machine Learning")
+
+# Load the data, setting "garbage" values to NA
+pml_training <- read.csv('./pml-training.csv', na.strings=c("NA","#DIV/0!", ""))
+dim(pml_training)
+
+# Remove non-predictive columns from the dataset
+pml_cleaned <- pml_training[, !(names(pml_training) %in% c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window"))]
+
+# Remove any columns that have NA values
+pml_cleaned <- pml_cleaned[, colSums(is.na(pml_cleaned)) == 0]
+
+# We should now have only 53 columns
+dim(pml_cleaned)
+
+# Partition the data such that 70% of the rows will be training data and the other 30% will be test data
+training_rows <- createDataPartition(pml_cleaned$classe, p = 0.7, list = FALSE)
+train_data <- pml_cleaned[training_rows, ]
+test_data <- pml_cleaned[-training_rows, ]
+
+dim(train_data)
+dim(test_data)
+```
+
+## Training the Model
+
+First, let us try a simple recursive partitioning method for the prediction model. For each of our models, we will use 10-fold cross validation to help us avoid overfitting.
+
+```{r}
+
+train_control <- trainControl(method = "cv", number = 10)
+
+model_rpart <- train(classe ~ ., data = train_data, method = "rpart", trControl = train_control)
+model_rpart
+```
+
+As can be seen, the accuracy of this model is extremely poor, coming in at around 50%. In other words, this model is no better than flipping a coin.
+
+Let's try using the random forest method instead. For better speed and efficiency, we will use the _parallel_ random forest algorithm. 
+
+```{r}
+
+registerDoParallel()
+model_parRF <- train(classe ~ ., data = train_data, method = "parRF", trControl = train_control)
+model_parRF
+```
+
+This is clearly a much better method, with an accuracy rate of 99.21%  This puts our in-sample error rate at 0.79%.
+
+Before we move on to run this model against the test data, however, there is one additional tweak we can try making to the model. Specifically, rather than using all 52 predictors, we could use a subset of them. For example, we could select the 8 most important predictors from the model and see how accurate the new model can be with just those 8 predictors. Using fewer predictors will certainly improve the performance, but we will need to weigh that against any potential hit to the accuracy.
+
+```{r}
+
+# Find the 8 most important predictors in the model
+imp <- varImp(model_parRF)$importance
+imp_cols <- rownames(imp)[order(imp$Overall, decreasing=TRUE)][1:8]
+
+# Reduce the training data to a smaller set that only uses those 8 predictors
+train_data_2 <- train_data[, c(imp_cols, "classe")]
+names(train_data_2)
+
+# Now use the parallel random forest method against this new data set
+model_parRF_small <- train(classe ~ ., data = train_data_2, method = "parRF", trControl = train_control)
+model_parRF_small
+```
+
+What we can see is that while the model ran faster, it is also less accurate, with an accuracy rate of 98.33%. Put another way, the in-sample error rate here is 1.67%. If we were dealing with extremely large data sets that we wanted to predict against, we might decide the trade-off in accuracy was worth the improved performance. However, in our case, since our data sets are fairly small, we will opt for the higher accuracy model with all 52 predictors.
+
+## Testing the Model
+
+Now we will test the model against the test set, and determine our out-of-sample error rate.
+
+```{r}
+
+# Generate our predictions
+predictions <- predict(model_parRF, newdata=test_data)
+
+# Create the confusion matrix comparing our predictions to the actual results
+confMatrix <- confusionMatrix(predictions, test_data$classe)
+confMatrix
+```
+
+The overall accuracy against the test set is 99.18%. As expected, the out-of-sample error rate of 0.82% is slightly higher than the in-sample error rate of 0.79%, but it is nevertheless quite good.
+
+## Applying Our Prediction Model
+
+Finally, we will apply our model to a dataset for which we do not know the answers, and predict the values for _classe_.
+
+```{r}
+# Load the data, setting "garbage" values to NA
+pml_testing <- read.csv('./pml-testing.csv', na.strings=c("NA","#DIV/0!", ""))
+
+# Ensure that the data has only the predictors that we used in our model
+pml_testing <- pml_testing[, names(train_data)[1:52]]
+
+# Generate our predictions
+predictions <- predict(model_parRF, newdata=pml_testing)
+predictions
+```
